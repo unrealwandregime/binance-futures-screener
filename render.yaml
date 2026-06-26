@@ -18,8 +18,8 @@ services:
       - key: SCREENER_DEEP_CACHE_TTL_SECONDS
         value: "180"
       - key: SCREENER_DEEP_BATCH_INTERVAL_SECONDS
-        value: "1.5"
+        value: "2"
       - key: SCREENER_DEEP_BATCH_SIZE
-        value: "72"
+        value: "20"
       - key: SCREENER_DEEP_WORKERS
-        value: "5"
+        value: "3"

@@ -52,13 +52,27 @@ BINANCE_WS = os.getenv("BINANCE_WS_BASE", "wss://fstream.binance.com/ws").rstrip
 REQUEST_TIMEOUT_SECONDS = env_float("SCREENER_REQUEST_TIMEOUT_SECONDS", 6, minimum=1, maximum=15)
 REST_QUOTE_TTL_SECONDS = env_float("SCREENER_REST_QUOTE_TTL_SECONDS", 10, minimum=1, maximum=60)
 DEEP_CACHE_TTL_SECONDS = env_float("SCREENER_DEEP_CACHE_TTL_SECONDS", 180, minimum=30, maximum=900)
-DEEP_BATCH_INTERVAL_SECONDS = env_float("SCREENER_DEEP_BATCH_INTERVAL_SECONDS", 1.5, minimum=0.5, maximum=30)
+DEEP_BATCH_INTERVAL_SECONDS = env_float("SCREENER_DEEP_BATCH_INTERVAL_SECONDS", 2, minimum=0.5, maximum=30)
 STREAM_STALE_SECONDS = env_float("SCREENER_STREAM_STALE_SECONDS", 12, minimum=3, maximum=120)
-DEEP_BATCH_SIZE = env_int("SCREENER_DEEP_BATCH_SIZE", 72, minimum=1, maximum=150)
-DEEP_WORKERS = env_int("SCREENER_DEEP_WORKERS", 5, minimum=1, maximum=12)
+DEEP_BATCH_SIZE = env_int("SCREENER_DEEP_BATCH_SIZE", 20, minimum=1, maximum=150)
+DEEP_WORKERS = env_int("SCREENER_DEEP_WORKERS", 3, minimum=1, maximum=12)
 MAX_ROWS = env_int("SCREENER_MAX_ROWS", 420, minimum=50, maximum=600)
 ENABLE_WS = os.getenv("SCREENER_ENABLE_WS", "1").lower() in {"1", "true", "yes"}
 PUBLIC_DIR = Path(__file__).resolve().parent / "public"
+DEEP_METRIC_FIELDS = ("chg5m", "chg1h", "vol1h", "oiUsd", "oiChg1h", "volatility15m", "trades5m")
+ROW_FIELD_DEFAULTS = {
+    "price": None,
+    "chg5m": None,
+    "chg1h": None,
+    "chg1d": None,
+    "vol1h": None,
+    "quoteVolume24h": None,
+    "oiUsd": None,
+    "oiChg1h": None,
+    "fundingRatePct": None,
+    "volatility15m": None,
+    "trades5m": None,
+}
 
 
 def utc_now() -> datetime:
@@ -369,6 +383,9 @@ class BinanceScreenerCache:
                     except Exception as exc:
                         self._record_error(f"{row.get('symbol')} deep metrics: {exc}")
                         continue
+                    if not any(key in metrics for key in DEEP_METRIC_FIELDS):
+                        self._record_error(f"{row.get('symbol')} deep metrics are still warming")
+                        continue
                     with self.lock:
                         self.deep_cache[str(row["symbol"])] = {
                             "ts": time.monotonic(),
@@ -421,11 +438,22 @@ class BinanceScreenerCache:
             cached = deep_cache.get(str(row.get("symbol")))
             if cached:
                 merged.update(cached.get("data") or {})
-            merged["deepHydrated"] = bool(cached)
+            for key, fallback in ROW_FIELD_DEFAULTS.items():
+                merged.setdefault(key, fallback)
+            merged["deepHydrated"] = any(key in merged and merged[key] is not None for key in DEEP_METRIC_FIELDS)
             merged["deepStale"] = bool(cached and now - float(cached.get("ts", 0.0)) >= DEEP_CACHE_TTL_SECONDS)
             merged["score"] = compute_signal_score(merged)
             merged_rows.append(merged)
-        return sorted(merged_rows, key=lambda item: item.get("quoteVolume24h") or 0, reverse=True)
+        return sorted(
+            merged_rows,
+            key=lambda item: (
+                item.get("score") or 0,
+                item.get("quoteVolume24h") or 0,
+                abs(num(item.get("chg1d")) or 0),
+                str(item.get("symbol") or ""),
+            ),
+            reverse=True,
+        )
 
     def _payload(self, rows: list[dict[str, Any]], source: str) -> dict[str, Any]:
         with self.lock:

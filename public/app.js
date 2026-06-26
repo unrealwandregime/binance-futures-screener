@@ -32,7 +32,7 @@ const state = {
   exchange: "binance",
   preset: "all",
   search: "",
-  sortKey: "quoteVolume24h",
+  sortKey: "score",
   sortDir: "desc",
   rows: [],
   previousPrices: new Map(),
@@ -273,7 +273,7 @@ function renderCell(row, key) {
   if (key === "symbol") {
     return `<div class="symbol-cell"><strong>${escapeHtml(row.symbol)}</strong><span>${escapeHtml(row.venue || "Binance Futures")}</span></div>`;
   }
-  if (DEEP_METRIC_KEYS.has(key) && !row.deepHydrated) return queuedValue();
+  if (DEEP_METRIC_KEYS.has(key) && !row.deepHydrated) return loadingValue();
   if (key === "price") return formatPrice(row.price);
   if (key === "chg5m" || key === "chg1h" || key === "chg1d" || key === "oiChg1h") return pctCell(row[key], 2);
   if (key === "vol1h" || key === "quoteVolume24h" || key === "oiUsd") return formatUsd(row[key]);
@@ -281,7 +281,7 @@ function renderCell(row, key) {
   if (key === "volatility15m") return pctCell(row[key], 2, false);
   if (key === "trades5m") return formatInteger(row[key]);
   if (key === "score") return scoreBadge(row.score);
-  return emptyValue();
+  return unavailableValue();
 }
 
 function renderMetrics(rows) {
@@ -304,7 +304,7 @@ function renderMetrics(rows) {
 
 function updateTableMeta(rows) {
   els.tableTitle.textContent = EXCHANGE_LABELS[state.exchange];
-  els.tableSubtitle.textContent = "Frontend refreshes every 1 second. Binance is fetched server-side, cached, and shared by all visitors.";
+  els.tableSubtitle.textContent = "Sorted by highest signal by default. Frontend refreshes every 1 second while Binance data is cached server-side.";
   els.lastRefresh.textContent = state.lastQuoteRefresh
     ? `Last backend quote ${utcTime(state.lastQuoteRefresh)}`
     : "Waiting for backend data";
@@ -429,7 +429,7 @@ function isFiniteNumber(value) {
 }
 
 function formatPrice(value) {
-  if (!isFiniteNumber(value) || Number(value) <= 0) return emptyValue();
+  if (!isFiniteNumber(value) || Number(value) <= 0) return unavailableValue();
   const number = Number(value);
   if (number >= 1_000) return number.toLocaleString(undefined, { maximumFractionDigits: 2 });
   if (number >= 1) return number.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 });
@@ -438,13 +438,14 @@ function formatPrice(value) {
 }
 
 function formatUsd(value) {
-  if (!isFiniteNumber(value) || Number(value) <= 0) return emptyValue();
+  if (!isFiniteNumber(value) || Number(value) < 0) return unavailableValue();
   return formatUsdText(value);
 }
 
 function formatUsdText(value) {
   const number = Number(value);
-  if (!Number.isFinite(number) || number <= 0) return "--";
+  if (!Number.isFinite(number) || number < 0) return "n/a";
+  if (number === 0) return "$0";
   if (number >= 1_000_000_000) return `$${(number / 1_000_000_000).toFixed(2)}B`;
   if (number >= 1_000_000) return `$${(number / 1_000_000).toFixed(2)}M`;
   if (number >= 1_000) return `$${(number / 1_000).toFixed(1)}K`;
@@ -452,19 +453,19 @@ function formatUsdText(value) {
 }
 
 function formatInteger(value) {
-  if (!isFiniteNumber(value) || Number(value) <= 0) return emptyValue();
+  if (!isFiniteNumber(value) || Number(value) < 0) return unavailableValue();
   return Number(value).toLocaleString(undefined, { maximumFractionDigits: 0 });
 }
 
 function pctCell(value, digits = 2, signed = true) {
-  if (!isFiniteNumber(value)) return emptyValue();
+  if (!isFiniteNumber(value)) return unavailableValue();
   const number = Number(value);
   const prefix = signed && number > 0 ? "+" : "";
   return `<span class="${numberClass(number)}">${prefix}${number.toFixed(digits)}%</span>`;
 }
 
 function fundingCell(value) {
-  if (!isFiniteNumber(value)) return emptyValue();
+  if (!isFiniteNumber(value)) return unavailableValue();
   const number = Number(value);
   const hot = Math.abs(number) >= 0.025;
   const className = hot ? "funding-hot" : numberClass(number);
@@ -488,7 +489,7 @@ function numberClass(value) {
 }
 
 function signedText(value, digits) {
-  if (!isFiniteNumber(value)) return "--";
+  if (!isFiniteNumber(value)) return "n/a";
   const number = Number(value);
   return `${number > 0 ? "+" : ""}${number.toFixed(digits)}`;
 }
@@ -497,12 +498,12 @@ function utcTime(value) {
   return `${new Date(value).toISOString().slice(11, 19)} UTC`;
 }
 
-function emptyValue() {
-  return `<span class="empty-value">--</span>`;
+function unavailableValue() {
+  return `<span class="unavailable-value" title="Binance does not currently provide this value for the symbol">n/a</span>`;
 }
 
-function queuedValue() {
-  return `<span class="pending-value" title="Queued for backend deep-metric hydration">queued</span>`;
+function loadingValue() {
+  return `<span class="pending-value" title="Backend is still hydrating this deep metric">loading</span>`;
 }
 
 function escapeHtml(value) {

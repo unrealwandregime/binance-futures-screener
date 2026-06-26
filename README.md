@@ -15,6 +15,7 @@ This project is intentionally independent. It does not depend on Dash, Plotly, P
 - Uses a shared backend cache so every visitor is not hitting Binance from their own browser.
 - Hydrates heavier per-symbol metrics in rolling batches so the app stays responsive on small hosting plans.
 - Shows UTC timestamps, cache age, hydration progress, and feed status in the UI.
+- Opens sorted by highest signal first, so the strongest anomaly candidates are at the top immediately.
 - Runs on Render Free, Docker, or any small Python web host.
 
 ## Live Demo
@@ -140,9 +141,9 @@ Example response shape:
 | `SCREENER_ENABLE_WS` | `1` | Enables Binance WebSocket streams |
 | `SCREENER_REST_QUOTE_TTL_SECONDS` | `10` | REST fallback cooldown |
 | `SCREENER_DEEP_CACHE_TTL_SECONDS` | `180` | Deep metric cache lifetime |
-| `SCREENER_DEEP_BATCH_INTERVAL_SECONDS` | `1.5` | Minimum pause between hydration batches |
-| `SCREENER_DEEP_BATCH_SIZE` | `72` | Symbols hydrated per backend batch |
-| `SCREENER_DEEP_WORKERS` | `5` | Concurrent deep metric workers |
+| `SCREENER_DEEP_BATCH_INTERVAL_SECONDS` | `2` | Minimum pause between hydration batches |
+| `SCREENER_DEEP_BATCH_SIZE` | `20` | Symbols hydrated per backend batch |
+| `SCREENER_DEEP_WORKERS` | `3` | Concurrent deep metric workers |
 | `SCREENER_ALLOWED_ORIGINS` | `*` locally | CORS allowlist for browser clients |
 
 Production clamps the numeric settings to reasonable ranges so a bad environment value cannot accidentally overload the host or Binance.
