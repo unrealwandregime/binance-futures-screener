@@ -67,9 +67,7 @@ function bindElements() {
   els.tableHead = document.getElementById("table-head");
   els.tableBody = document.getElementById("table-body");
   els.tableTitle = document.getElementById("table-title");
-  els.tableSubtitle = document.getElementById("table-subtitle");
   els.lastRefresh = document.getElementById("last-refresh");
-  els.deepRefresh = document.getElementById("deep-refresh");
   els.metricSymbols = document.getElementById("metric-symbols");
   els.metricVolume = document.getElementById("metric-volume");
   els.metricMove = document.getElementById("metric-move");
@@ -304,26 +302,9 @@ function renderMetrics(rows) {
 
 function updateTableMeta(rows) {
   els.tableTitle.textContent = EXCHANGE_LABELS[state.exchange];
-  els.tableSubtitle.textContent = "Sorted by highest signal by default. Frontend refreshes every 1 second while Binance data is cached server-side.";
   els.lastRefresh.textContent = state.lastQuoteRefresh
     ? `Last backend quote ${utcTime(state.lastQuoteRefresh)}`
     : "Waiting for backend data";
-
-  const payload = state.payload;
-  if (!payload) {
-    els.deepRefresh.textContent = "Deep metrics pending";
-    return;
-  }
-  const deepText = payload.deepRefreshing
-    ? "Deep metrics refreshing"
-    : payload.deepGeneratedAt
-      ? `Deep metrics ${utcTime(Date.parse(payload.deepGeneratedAt))}`
-      : "Deep metrics pending";
-  const hydrationText = isFiniteNumber(payload.deepHydratedCount)
-    ? `hydrated ${Number(payload.deepHydratedCount).toLocaleString()}/${Number(payload.deepTotalRows || state.rows.length).toLocaleString()}`
-    : "hydration queued";
-  const cacheText = isFiniteNumber(payload.cacheAgeMs) ? `cache age ${(Number(payload.cacheAgeMs) / 1000).toFixed(1)}s` : "cache warming";
-  els.deepRefresh.textContent = `${deepText} | ${hydrationText} | ${cacheText} | showing ${rows.length} symbols`;
 }
 
 function renderLoadingState() {
