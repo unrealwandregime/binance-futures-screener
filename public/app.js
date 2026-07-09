@@ -165,7 +165,7 @@ function normalizeRows(rows) {
 function updateStatusFromPayload(payload) {
   const source = payload.source === "binance_ws" ? "WebSocket cache" : "REST cache";
   if (payload.status === "live") {
-    const deepNote = payload.deepStatus === "paused" ? " | deep metrics waiting" : "";
+    const deepNote = payload.deepStatus === "paused" ? " | deep REST paused" : "";
     setStatus("live", `Binance live via ${source}${deepNote} | UI 1s | UTC`);
     return;
   }
@@ -305,7 +305,7 @@ function updateTableMeta(rows) {
   els.tableTitle.textContent = EXCHANGE_LABELS[state.exchange];
   const deepStatus = state.payload?.deepStatus;
   const deepText = deepStatus === "paused"
-    ? " | deep REST metrics waiting"
+    ? " | deep REST metrics paused"
     : deepStatus === "hydrating"
       ? ` | deep metrics ${state.payload.deepHydratedCount}/${state.payload.deepTotalRows}`
       : "";
