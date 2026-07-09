@@ -48,12 +48,13 @@ def public_error(message: str | None) -> str | None:
 
 
 BINANCE_FAPI = os.getenv("BINANCE_FAPI_BASE", "https://fapi.binance.com").rstrip("/")
-BINANCE_WS = os.getenv("BINANCE_WS_BASE", "wss://fstream.binance.com/ws").rstrip("/")
+BINANCE_WS = os.getenv("BINANCE_WS_BASE", "wss://fstream.binance.com/market/ws").rstrip("/")
 REQUEST_TIMEOUT_SECONDS = env_float("SCREENER_REQUEST_TIMEOUT_SECONDS", 6, minimum=1, maximum=15)
 REST_QUOTE_TTL_SECONDS = env_float("SCREENER_REST_QUOTE_TTL_SECONDS", 10, minimum=1, maximum=60)
 DEEP_CACHE_TTL_SECONDS = env_float("SCREENER_DEEP_CACHE_TTL_SECONDS", 180, minimum=30, maximum=900)
 DEEP_BATCH_INTERVAL_SECONDS = env_float("SCREENER_DEEP_BATCH_INTERVAL_SECONDS", 2, minimum=0.5, maximum=30)
 STREAM_STALE_SECONDS = env_float("SCREENER_STREAM_STALE_SECONDS", 12, minimum=3, maximum=120)
+WS_WARMUP_SECONDS = env_float("SCREENER_WS_WARMUP_SECONDS", 15, minimum=2, maximum=60)
 DEEP_BATCH_SIZE = env_int("SCREENER_DEEP_BATCH_SIZE", 20, minimum=1, maximum=150)
 DEEP_WORKERS = env_int("SCREENER_DEEP_WORKERS", 3, minimum=1, maximum=12)
 MAX_ROWS = env_int("SCREENER_MAX_ROWS", 420, minimum=50, maximum=600)
@@ -143,6 +144,7 @@ class BinanceScreenerCache:
         self.base_refreshing = False
         self.deep_refreshing = False
         self.streams_started = False
+        self.streams_started_at: float | None = None
         self.rest_backoff_until = 0.0
         self.last_deep_batch_started_at = 0.0
 
@@ -153,6 +155,7 @@ class BinanceScreenerCache:
             if self.streams_started:
                 return
             self.streams_started = True
+            self.streams_started_at = time.monotonic()
 
         self._start_stream("ticker", f"{BINANCE_WS}/!ticker@arr", self._handle_ticker_payload)
         self._start_stream("mark", f"{BINANCE_WS}/!markPrice@arr@1s", self._handle_mark_payload)
@@ -180,6 +183,8 @@ class BinanceScreenerCache:
             self.last_error = public_error(message)
 
     def _handle_ticker_payload(self, payload: Any) -> None:
+        if isinstance(payload, dict) and isinstance(payload.get("data"), list):
+            payload = payload["data"]
         rows = payload if isinstance(payload, list) else [payload]
         with self.lock:
             for row in rows:
@@ -190,6 +195,8 @@ class BinanceScreenerCache:
             self.last_error = None
 
     def _handle_mark_payload(self, payload: Any) -> None:
+        if isinstance(payload, dict) and isinstance(payload.get("data"), list):
+            payload = payload["data"]
         rows = payload if isinstance(payload, list) else [payload]
         with self.lock:
             for row in rows:
@@ -211,6 +218,9 @@ class BinanceScreenerCache:
             self._maybe_start_deep_refresh(stream_rows)
             return self._payload(rows, source="binance_ws")
 
+        if self._waiting_for_stream_warmup():
+            return self._payload([], source="binance_ws_warming")
+
         should_block = not self._has_rows()
         if self._rest_refresh_due():
             self._refresh_rest(blocking=should_block)
@@ -230,6 +240,16 @@ class BinanceScreenerCache:
             if self.last_stream_message_at is None:
                 return None
             return max(0.0, time.monotonic() - self.last_stream_message_at)
+
+    def _waiting_for_stream_warmup(self) -> bool:
+        if not ENABLE_WS:
+            return False
+        with self.lock:
+            if self.last_stream_message_at is not None:
+                return False
+            if self.streams_started_at is None:
+                return False
+            return time.monotonic() - self.streams_started_at < WS_WARMUP_SECONDS
 
     def _rows_from_stream(self) -> list[dict[str, Any]]:
         with self.lock:
@@ -298,7 +318,7 @@ class BinanceScreenerCache:
 
     def _fetch_rest_base_rows(self) -> list[dict[str, Any]]:
         if time.monotonic() < self.rest_backoff_until:
-            raise RuntimeError("Binance REST is cooling down after a rate-limit response")
+            raise RuntimeError("Binance REST is paused after a rate-limit response; waiting for WebSocket data")
 
         tickers = self._get("/fapi/v1/ticker/24hr")
         premiums = self._get("/fapi/v1/premiumIndex")
@@ -331,22 +351,35 @@ class BinanceScreenerCache:
         return sorted(rows, key=lambda item: item.get("quoteVolume24h") or 0, reverse=True)
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        if time.monotonic() < self.rest_backoff_until:
+            raise RuntimeError("Binance REST is paused after a rate-limit response; waiting for WebSocket data")
+
         response = self.session.get(
             f"{BINANCE_FAPI}{path}",
             params=params,
             timeout=REQUEST_TIMEOUT_SECONDS,
         )
-        if response.status_code == 418:
-            self.rest_backoff_until = time.monotonic() + 120
+        if response.status_code in {418, 429}:
+            self._set_rest_backoff(response.text, default_seconds=300 if response.status_code == 418 else 60)
         if not response.ok:
             message = response.text[:180].replace("\n", " ")
             raise RuntimeError(f"Binance {path} returned {response.status_code}: {message}")
         return response.json()
 
+    def _set_rest_backoff(self, body: str, default_seconds: int) -> None:
+        wait_seconds = default_seconds
+        match = re.search(r"banned until (\d{13})", body or "")
+        if match:
+            ban_until_epoch = int(match.group(1)) / 1000
+            wait_seconds = max(default_seconds, int(ban_until_epoch - time.time()) + 30)
+        self.rest_backoff_until = time.monotonic() + wait_seconds
+
     def _maybe_start_deep_refresh(self, base_rows: list[dict[str, Any]]) -> None:
         now = time.monotonic()
         with self.lock:
             if self.deep_refreshing:
+                return
+            if now < self.rest_backoff_until:
                 return
             if now - self.last_deep_batch_started_at < DEEP_BATCH_INTERVAL_SECONDS:
                 return

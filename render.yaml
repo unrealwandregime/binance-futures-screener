@@ -13,6 +13,10 @@ services:
         value: https://binance-futures-screener-a39v.onrender.com,https://unrealwandregime.github.io
       - key: SCREENER_ENABLE_WS
         value: "1"
+      - key: BINANCE_WS_BASE
+        value: wss://fstream.binance.com/market/ws
+      - key: SCREENER_WS_WARMUP_SECONDS
+        value: "15"
       - key: SCREENER_REST_QUOTE_TTL_SECONDS
         value: "10"
       - key: SCREENER_DEEP_CACHE_TTL_SECONDS

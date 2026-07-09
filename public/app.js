@@ -165,7 +165,7 @@ function normalizeRows(rows) {
 function updateStatusFromPayload(payload) {
   const source = payload.source === "binance_ws" ? "WebSocket cache" : "REST cache";
   if (payload.status === "live") {
-    setStatus("live", `Binance live via ${source} | UI 1s | UTC+00:00`);
+    setStatus("live", `Binance live via ${source} | UI 1s | UTC`);
     return;
   }
   if (payload.status === "stale") {

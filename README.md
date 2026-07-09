@@ -36,7 +36,7 @@ flowchart LR
   D --> E["Dark-mode frontend"]
 ```
 
-The backend prefers Binance WebSocket ticker streams for fresh quote data. If the stream is not warm yet, it can fall back to Binance REST. Heavier metrics such as open interest, 1-hour volume, volatility, and trade count are fetched separately in controlled batches.
+The backend prefers Binance WebSocket ticker streams for fresh quote data through the current USD-M futures market route, `wss://fstream.binance.com/market/ws`. If the stream is not warm after a short grace period, it can fall back to Binance REST. Heavier metrics such as open interest, 1-hour volume, volatility, and trade count are fetched separately in controlled batches.
 
 ## Tech Stack
 
@@ -139,7 +139,9 @@ Example response shape:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `SCREENER_ENABLE_WS` | `1` | Enables Binance WebSocket streams |
-| `SCREENER_REST_QUOTE_TTL_SECONDS` | `10` | REST fallback cooldown |
+| `BINANCE_WS_BASE` | `wss://fstream.binance.com/market/ws` | Binance USD-M futures market WebSocket base |
+| `SCREENER_WS_WARMUP_SECONDS` | `15` | Grace period before REST fallback is allowed during startup |
+| `SCREENER_REST_QUOTE_TTL_SECONDS` | `10` | Minimum pause between REST fallback quote refreshes |
 | `SCREENER_DEEP_CACHE_TTL_SECONDS` | `180` | Deep metric cache lifetime |
 | `SCREENER_DEEP_BATCH_INTERVAL_SECONDS` | `2` | Minimum pause between hydration batches |
 | `SCREENER_DEEP_BATCH_SIZE` | `20` | Symbols hydrated per backend batch |
