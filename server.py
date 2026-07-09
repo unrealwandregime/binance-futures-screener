@@ -221,6 +221,11 @@ class BinanceScreenerCache:
         if self._waiting_for_stream_warmup():
             return self._payload([], source="binance_ws_warming")
 
+        if self._rest_is_paused():
+            with self.lock:
+                rows = list(self.rows)
+            return self._payload(rows, source="binance_ws" if rows else "binance_ws_warming")
+
         should_block = not self._has_rows()
         if self._rest_refresh_due():
             self._refresh_rest(blocking=should_block)
@@ -250,6 +255,10 @@ class BinanceScreenerCache:
             if self.streams_started_at is None:
                 return False
             return time.monotonic() - self.streams_started_at < WS_WARMUP_SECONDS
+
+    def _rest_is_paused(self) -> bool:
+        with self.lock:
+            return time.monotonic() < self.rest_backoff_until
 
     def _rows_from_stream(self) -> list[dict[str, Any]]:
         with self.lock:
@@ -496,11 +505,22 @@ class BinanceScreenerCache:
             deep_refreshing = self.deep_refreshing
             base_refreshing = self.base_refreshing
             deep_cache = dict(self.deep_cache)
+            rest_paused = time.monotonic() < self.rest_backoff_until
 
         stream_age = self._stream_age_seconds()
         cache_age = (utc_now() - generated_at).total_seconds() if generated_at else None
         visible_rows = rows[:MAX_ROWS]
         deep_hydrated_count = sum(1 for row in visible_rows if str(row.get("symbol")) in deep_cache)
+        if rest_paused:
+            deep_status = "paused"
+        elif deep_hydrated_count >= len(visible_rows) and visible_rows:
+            deep_status = "hydrated"
+        elif deep_refreshing:
+            deep_status = "hydrating"
+        elif visible_rows:
+            deep_status = "queued"
+        else:
+            deep_status = "warming"
         if rows and (stream_age is None or stream_age <= STREAM_STALE_SECONDS):
             status = "live"
         elif rows:
@@ -522,6 +542,8 @@ class BinanceScreenerCache:
             "quoteRefreshMs": 1000,
             "deepRefreshMs": round(DEEP_CACHE_TTL_SECONDS * 1000),
             "deepBatchSize": DEEP_BATCH_SIZE,
+            "deepStatus": deep_status,
+            "restPaused": rest_paused,
             "deepHydratedCount": deep_hydrated_count,
             "deepQueuedCount": max(0, len(visible_rows) - deep_hydrated_count),
             "deepTotalRows": len(visible_rows),

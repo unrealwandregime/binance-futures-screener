@@ -165,7 +165,8 @@ function normalizeRows(rows) {
 function updateStatusFromPayload(payload) {
   const source = payload.source === "binance_ws" ? "WebSocket cache" : "REST cache";
   if (payload.status === "live") {
-    setStatus("live", `Binance live via ${source} | UI 1s | UTC`);
+    const deepNote = payload.deepStatus === "paused" ? " | deep metrics waiting" : "";
+    setStatus("live", `Binance live via ${source}${deepNote} | UI 1s | UTC`);
     return;
   }
   if (payload.status === "stale") {
@@ -271,7 +272,7 @@ function renderCell(row, key) {
   if (key === "symbol") {
     return `<div class="symbol-cell"><strong>${escapeHtml(row.symbol)}</strong><span>${escapeHtml(row.venue || "Binance Futures")}</span></div>`;
   }
-  if (DEEP_METRIC_KEYS.has(key) && !row.deepHydrated) return loadingValue();
+  if (DEEP_METRIC_KEYS.has(key) && !row.deepHydrated) return deepMetricPlaceholder(key);
   if (key === "price") return formatPrice(row.price);
   if (key === "chg5m" || key === "chg1h" || key === "chg1d" || key === "oiChg1h") return pctCell(row[key], 2);
   if (key === "vol1h" || key === "quoteVolume24h" || key === "oiUsd") return formatUsd(row[key]);
@@ -302,8 +303,14 @@ function renderMetrics(rows) {
 
 function updateTableMeta(rows) {
   els.tableTitle.textContent = EXCHANGE_LABELS[state.exchange];
+  const deepStatus = state.payload?.deepStatus;
+  const deepText = deepStatus === "paused"
+    ? " | deep REST metrics waiting"
+    : deepStatus === "hydrating"
+      ? ` | deep metrics ${state.payload.deepHydratedCount}/${state.payload.deepTotalRows}`
+      : "";
   els.lastRefresh.textContent = state.lastQuoteRefresh
-    ? `Last backend quote ${utcTime(state.lastQuoteRefresh)}`
+    ? `Last backend quote ${utcTime(state.lastQuoteRefresh)}${deepText}`
     : "Waiting for backend data";
 }
 
@@ -483,8 +490,16 @@ function unavailableValue() {
   return `<span class="unavailable-value" title="Binance does not currently provide this value for the symbol">n/a</span>`;
 }
 
-function loadingValue() {
-  return `<span class="pending-value" title="Backend is still hydrating this deep metric">loading</span>`;
+function deepMetricPlaceholder(key) {
+  if (state.payload?.deepStatus === "paused" || state.payload?.restPaused) {
+    return `<span class="empty-value" title="${escapeHtml(deepMetricLabel(key))} is temporarily unavailable while Binance REST is rate-limited. WebSocket price, 24h volume, 1d change, and funding are still live.">--</span>`;
+  }
+  return `<span class="pending-value" title="Backend is hydrating ${escapeHtml(deepMetricLabel(key))} in controlled batches">waiting</span>`;
+}
+
+function deepMetricLabel(key) {
+  const column = COLUMNS.find((item) => item.key === key);
+  return column ? column.label : key;
 }
 
 function escapeHtml(value) {

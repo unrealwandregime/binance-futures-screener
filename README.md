@@ -104,7 +104,7 @@ Score bands:
 
 Binance publishes quote-level fields for all futures markets quickly. Deep metrics are heavier because they require extra requests per symbol.
 
-To avoid hammering Binance and getting the backend IP rate-limited, the service hydrates those deeper fields in batches. Right after a deploy or restart, lower-volume rows may briefly show `queued`. As the hydration queue progresses, those cells fill in automatically.
+To avoid hammering Binance and getting the backend IP rate-limited, the service hydrates those deeper fields in batches. Right after a deploy or restart, lower-volume rows may briefly show `waiting`. If Binance temporarily pauses REST access for the host, deep REST-only cells show `--` while WebSocket-backed quote, 24-hour volume, 1-day change, and funding fields continue updating live.
 
 ## API Contract
 
@@ -124,6 +124,8 @@ Example response shape:
   "streamAgeMs": 420,
   "quoteRefreshMs": 1000,
   "deepRefreshMs": 180000,
+  "deepStatus": "hydrated",
+  "restPaused": false,
   "deepHydratedCount": 420,
   "deepQueuedCount": 0,
   "deepTotalRows": 420,
