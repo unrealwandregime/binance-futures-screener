@@ -185,9 +185,10 @@ function normalizeRows(rows) {
 function updateStatusFromPayload(payload) {
   const source = payload.source === "binance_ws" ? "WebSocket cache" : "REST cache";
   if (payload.status === "live") {
+    const browserFallback = shouldUseBrowserDeepFallback(payload);
     const sourceNote = payload.deepProxyEnabled ? " | deep via proxy" : "";
-    const pausedNote = payload.deepStatus === "paused" ? ` | ${deepSourceLabel(payload)} paused${deepRetryLabel(payload)}` : "";
-    const browserNote = shouldUseBrowserDeepFallback(payload) ? " | browser deep fill" : "";
+    const pausedNote = payload.deepStatus === "paused" && !browserFallback ? ` | ${deepSourceLabel(payload)} paused${deepRetryLabel(payload)}` : "";
+    const browserNote = browserFallback ? " | browser deep fill" : "";
     setStatus("live", `Binance live via ${source}${sourceNote}${browserNote}${pausedNote} | UI 1s | UTC`);
     return;
   }
@@ -326,13 +327,16 @@ function renderMetrics(rows) {
 function updateTableMeta(rows) {
   els.tableTitle.textContent = EXCHANGE_LABELS[state.exchange];
   const deepStatus = state.payload?.deepStatus;
+  const browserFallback = shouldUseBrowserDeepFallback(state.payload);
   const browserCount = [...state.browserDeepCache.values()]
     .filter((entry) => Date.now() - entry.ts < CONFIG.browserDeepCacheTtlMs)
     .length;
-  const browserText = shouldUseBrowserDeepFallback(state.payload) && browserCount
+  const browserText = browserFallback && browserCount
     ? ` | browser-filled ${browserCount}`
     : "";
-  const deepText = deepStatus === "paused"
+  const deepText = browserFallback
+    ? " | deep metrics filling in browser"
+    : deepStatus === "paused"
     ? ` | ${deepSourceLabel(state.payload)} metrics paused${deepRetryLabel(state.payload)}`
     : deepStatus === "hydrating"
       ? ` | ${deepSourceLabel(state.payload)} metrics ${state.payload.deepHydratedCount}/${state.payload.deepTotalRows}`
@@ -709,8 +713,7 @@ function deepMetricPlaceholder(row, key) {
     return `<span class="pending-value" title="Queued for browser-side Binance public data fill">queued</span>`;
   }
   if (state.payload?.deepStatus === "paused" || state.payload?.deepRestPaused) {
-    const source = deepSourceLabel(state.payload);
-    return `<span class="pending-value" title="${escapeHtml(deepMetricLabel(key))} is being filled in the browser because ${escapeHtml(source)} is paused${escapeHtml(deepRetryLabel(state.payload))}.">syncing</span>`;
+    return `<span class="pending-value" title="${escapeHtml(deepMetricLabel(key))} is being filled directly from Binance public data in the browser.">syncing</span>`;
   }
   return `<span class="pending-value" title="Backend is hydrating ${escapeHtml(deepMetricLabel(key))} in controlled batches">waiting</span>`;
 }
