@@ -1,2 +1,11 @@
+[project]
+name = "binance-futures-deep-proxy"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+  "Flask>=3.0",
+  "requests>=2.32"
+]
+
 [tool.vercel]
 entrypoint = "deep_proxy:app"
