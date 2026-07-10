@@ -49,7 +49,10 @@ def public_error(message: str | None) -> str | None:
 
 BINANCE_FAPI = os.getenv("BINANCE_FAPI_BASE", "https://fapi.binance.com").rstrip("/")
 BINANCE_WS = os.getenv("BINANCE_WS_BASE", "wss://fstream.binance.com/market/ws").rstrip("/")
+DEEP_PROXY_BASE = os.getenv("SCREENER_DEEP_PROXY_BASE", "").rstrip("/")
+DEEP_PROXY_TOKEN = os.getenv("SCREENER_DEEP_PROXY_TOKEN", "")
 REQUEST_TIMEOUT_SECONDS = env_float("SCREENER_REQUEST_TIMEOUT_SECONDS", 6, minimum=1, maximum=15)
+DEEP_PROXY_TIMEOUT_SECONDS = env_float("SCREENER_DEEP_PROXY_TIMEOUT_SECONDS", 8, minimum=1, maximum=20)
 REST_QUOTE_TTL_SECONDS = env_float("SCREENER_REST_QUOTE_TTL_SECONDS", 10, minimum=1, maximum=60)
 DEEP_CACHE_TTL_SECONDS = env_float("SCREENER_DEEP_CACHE_TTL_SECONDS", 180, minimum=30, maximum=900)
 DEEP_BATCH_INTERVAL_SECONDS = env_float("SCREENER_DEEP_BATCH_INTERVAL_SECONDS", 2, minimum=0.5, maximum=30)
@@ -146,6 +149,9 @@ class BinanceScreenerCache:
         self.streams_started = False
         self.streams_started_at: float | None = None
         self.rest_backoff_until = 0.0
+        self.rest_backoff_until_epoch: float | None = None
+        self.deep_proxy_backoff_until = 0.0
+        self.deep_proxy_backoff_until_epoch: float | None = None
         self.last_deep_batch_started_at = 0.0
 
     def ensure_streams(self) -> None:
@@ -382,13 +388,14 @@ class BinanceScreenerCache:
             ban_until_epoch = int(match.group(1)) / 1000
             wait_seconds = max(default_seconds, int(ban_until_epoch - time.time()) + 30)
         self.rest_backoff_until = time.monotonic() + wait_seconds
+        self.rest_backoff_until_epoch = time.time() + wait_seconds
 
     def _maybe_start_deep_refresh(self, base_rows: list[dict[str, Any]]) -> None:
         now = time.monotonic()
         with self.lock:
             if self.deep_refreshing:
                 return
-            if now < self.rest_backoff_until:
+            if self._deep_source_paused_locked(now):
                 return
             if now - self.last_deep_batch_started_at < DEEP_BATCH_INTERVAL_SECONDS:
                 return
@@ -441,6 +448,56 @@ class BinanceScreenerCache:
                 self.deep_refreshing = False
 
     def _fetch_deep_metrics(self, row: dict[str, Any]) -> dict[str, Any]:
+        if DEEP_PROXY_BASE:
+            return self._fetch_deep_metrics_from_proxy(row)
+        return self._fetch_deep_metrics_from_binance(row)
+
+    def _fetch_deep_metrics_from_proxy(self, row: dict[str, Any]) -> dict[str, Any]:
+        symbol = row["symbol"]
+        headers = {"accept": "application/json", "user-agent": "binance-futures-screener/1.0"}
+        if DEEP_PROXY_TOKEN:
+            headers["authorization"] = f"Bearer {DEEP_PROXY_TOKEN}"
+
+        response = self.session.get(
+            f"{DEEP_PROXY_BASE}/api/deep",
+            params={"symbol": symbol, "price": row.get("price")},
+            headers=headers,
+            timeout=DEEP_PROXY_TIMEOUT_SECONDS,
+        )
+        if response.status_code in {418, 429, 503}:
+            self._set_deep_proxy_backoff(response)
+        if not response.ok:
+            message = response.text[:180].replace("\n", " ")
+            raise RuntimeError(f"Deep proxy returned {response.status_code}: {message}")
+
+        payload = response.json()
+        metrics = payload.get("metrics") if isinstance(payload, dict) else payload
+        if not isinstance(metrics, dict):
+            raise RuntimeError("Deep proxy returned an invalid metrics payload")
+        return {key: metrics.get(key) for key in DEEP_METRIC_FIELDS if metrics.get(key) is not None}
+
+    def _set_deep_proxy_backoff(self, response: requests.Response) -> None:
+        wait_seconds = 60
+        retry_after = response.headers.get("Retry-After")
+        if retry_after:
+            try:
+                wait_seconds = max(wait_seconds, int(float(retry_after)) + 5)
+            except ValueError:
+                pass
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {}
+        if isinstance(payload, dict):
+            retry_after_seconds = num(payload.get("retryAfterSeconds"), None)
+            if retry_after_seconds is not None:
+                wait_seconds = max(wait_seconds, int(retry_after_seconds) + 5)
+
+        with self.lock:
+            self.deep_proxy_backoff_until = time.monotonic() + wait_seconds
+            self.deep_proxy_backoff_until_epoch = time.time() + wait_seconds
+
+    def _fetch_deep_metrics_from_binance(self, row: dict[str, Any]) -> dict[str, Any]:
         symbol = row["symbol"]
         metrics: dict[str, Any] = {}
 
@@ -468,6 +525,11 @@ class BinanceScreenerCache:
             self._record_error(f"{symbol} open interest history unavailable: {exc}")
 
         return metrics
+
+    def _deep_source_paused_locked(self, now: float) -> bool:
+        if DEEP_PROXY_BASE:
+            return now < self.deep_proxy_backoff_until
+        return now < self.rest_backoff_until
 
     def _merge_cached_metrics(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         with self.lock:
@@ -505,13 +567,19 @@ class BinanceScreenerCache:
             deep_refreshing = self.deep_refreshing
             base_refreshing = self.base_refreshing
             deep_cache = dict(self.deep_cache)
-            rest_paused = time.monotonic() < self.rest_backoff_until
+            now = time.monotonic()
+            rest_paused = now < self.rest_backoff_until
+            deep_proxy_paused = now < self.deep_proxy_backoff_until
+            deep_rest_paused = deep_proxy_paused if DEEP_PROXY_BASE else rest_paused
+            rest_retry_at = self.rest_backoff_until_epoch if rest_paused else None
+            proxy_retry_at = self.deep_proxy_backoff_until_epoch if deep_proxy_paused else None
+            deep_retry_at = proxy_retry_at if DEEP_PROXY_BASE else rest_retry_at
 
         stream_age = self._stream_age_seconds()
         cache_age = (utc_now() - generated_at).total_seconds() if generated_at else None
         visible_rows = rows[:MAX_ROWS]
         deep_hydrated_count = sum(1 for row in visible_rows if str(row.get("symbol")) in deep_cache)
-        if rest_paused:
+        if deep_rest_paused:
             deep_status = "paused"
         elif deep_hydrated_count >= len(visible_rows) and visible_rows:
             deep_status = "hydrated"
@@ -544,6 +612,11 @@ class BinanceScreenerCache:
             "deepBatchSize": DEEP_BATCH_SIZE,
             "deepStatus": deep_status,
             "restPaused": rest_paused,
+            "deepRestPaused": deep_rest_paused,
+            "deepProxyEnabled": bool(DEEP_PROXY_BASE),
+            "deepSource": "proxy" if DEEP_PROXY_BASE else "binance_rest",
+            "deepRetryAt": iso_utc(datetime.fromtimestamp(deep_retry_at, timezone.utc)) if deep_retry_at else None,
+            "deepRetryInMs": max(0, round((deep_retry_at - time.time()) * 1000)) if deep_retry_at else None,
             "deepHydratedCount": deep_hydrated_count,
             "deepQueuedCount": max(0, len(visible_rows) - deep_hydrated_count),
             "deepTotalRows": len(visible_rows),
@@ -661,7 +734,13 @@ def api_screener():
 @app.get("/api/healthz")
 @app.get("/healthz")
 def healthz():
-    return jsonify({"status": "ok", "service": "binance-futures-screener", "time": iso_utc()})
+    return jsonify({
+        "status": "ok",
+        "service": "binance-futures-screener",
+        "time": iso_utc(),
+        "deepProxyEnabled": bool(DEEP_PROXY_BASE),
+        "deepSource": "proxy" if DEEP_PROXY_BASE else "binance_rest",
+    })
 
 
 @app.get("/")

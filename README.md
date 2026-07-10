@@ -32,11 +32,14 @@ The hosted app uses public Binance market-data endpoints only. There is no accou
 flowchart LR
   A["Binance Futures WebSocket"] --> C["Python backend cache"]
   B["Binance Futures REST fallback"] --> C
+  P["Optional deep REST proxy on clean IP"] --> C
   C --> D["/api/screener"]
   D --> E["Dark-mode frontend"]
 ```
 
 The backend prefers Binance WebSocket ticker streams for fresh quote data through the current USD-M futures market route, `wss://fstream.binance.com/market/ws`. If the stream is not warm after a short grace period, it can fall back to Binance REST. Heavier metrics such as open interest, 1-hour volume, volatility, and trade count are fetched separately in controlled batches.
+
+For production, the public screener can keep running on Render while deep metrics are fetched through a separate REST proxy on a cleaner outbound IP. That proxy is optional. If `SCREENER_DEEP_PROXY_BASE` is not set, the app behaves exactly like the normal single-service version.
 
 ## Tech Stack
 
@@ -104,7 +107,7 @@ Score bands:
 
 Binance publishes quote-level fields for all futures markets quickly. Deep metrics are heavier because they require extra requests per symbol.
 
-To avoid hammering Binance and getting the backend IP rate-limited, the service hydrates those deeper fields in batches. Right after a deploy or restart, lower-volume rows may briefly show `waiting`. If Binance temporarily pauses REST access for the host, the UI labels the deep REST metrics as paused and those REST-only cells show `--` while WebSocket-backed quote, 24-hour volume, 1-day change, and funding fields continue updating live.
+To avoid hammering Binance and getting the backend IP rate-limited, the service hydrates those deeper fields in batches. Right after a deploy or restart, lower-volume rows may briefly show `waiting`. If Binance temporarily pauses REST access for the host, the UI labels the deep source as paused and those REST-only cells show `--` while WebSocket-backed quote, 24-hour volume, 1-day change, and funding fields continue updating live.
 
 ## API Contract
 
@@ -126,6 +129,11 @@ Example response shape:
   "deepRefreshMs": 180000,
   "deepStatus": "hydrated",
   "restPaused": false,
+  "deepRestPaused": false,
+  "deepProxyEnabled": false,
+  "deepSource": "binance_rest",
+  "deepRetryAt": null,
+  "deepRetryInMs": null,
   "deepHydratedCount": 420,
   "deepQueuedCount": 0,
   "deepTotalRows": 420,
@@ -148,9 +156,67 @@ Example response shape:
 | `SCREENER_DEEP_BATCH_INTERVAL_SECONDS` | `2` | Minimum pause between hydration batches |
 | `SCREENER_DEEP_BATCH_SIZE` | `20` | Symbols hydrated per backend batch |
 | `SCREENER_DEEP_WORKERS` | `3` | Concurrent deep metric workers |
+| `SCREENER_DEEP_PROXY_BASE` | unset | Optional base URL for a separate deep-metrics proxy |
+| `SCREENER_DEEP_PROXY_TOKEN` | unset | Bearer token sent to the deep proxy when configured |
+| `SCREENER_DEEP_PROXY_TIMEOUT_SECONDS` | `8` | Timeout for deep proxy calls |
 | `SCREENER_ALLOWED_ORIGINS` | `*` locally | CORS allowlist for browser clients |
 
 Production clamps the numeric settings to reasonable ranges so a bad environment value cannot accidentally overload the host or Binance.
+
+## Production Deep-Metrics Proxy
+
+The clean production setup is two services:
+
+1. Public screener on Render: serves the UI, keeps the Binance WebSocket connection warm, and exposes `/api/screener`.
+2. Private deep proxy on a clean VPS or backend IP: makes the heavier Binance REST calls for 5-minute change, 1-hour volume, open interest, volatility, and trade count.
+
+Do not run the proxy on the same Render free service and expect it to fix Render's IP reputation. The point is to move the REST-heavy requests to a separate outbound IP with calmer rate limits.
+
+The proxy entrypoint is `deep_proxy.py`.
+
+Local proxy run:
+
+```powershell
+$env:DEEP_PROXY_REQUIRE_TOKEN="0"
+python deep_proxy.py
+```
+
+Proxy health check:
+
+```text
+http://127.0.0.1:8060/api/healthz
+```
+
+Proxy deep metric example:
+
+```text
+http://127.0.0.1:8060/api/deep?symbol=BTCUSDT&price=60000
+```
+
+Production proxy command:
+
+```bash
+gunicorn deep_proxy:server --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120
+```
+
+Recommended proxy environment:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DEEP_PROXY_TOKEN` | unset | Shared bearer token required by the screener |
+| `DEEP_PROXY_REQUIRE_TOKEN` | `1` | Keeps the proxy closed unless a token is configured |
+| `DEEP_PROXY_CACHE_TTL_SECONDS` | `180` | Per-symbol deep metrics cache |
+| `DEEP_PROXY_MIN_UPSTREAM_INTERVAL_SECONDS` | `0.35` | Minimum spacing between Binance REST calls |
+| `DEEP_PROXY_REQUEST_TIMEOUT_SECONDS` | `6` | Binance request timeout |
+
+Then set these on the public screener service:
+
+```text
+SCREENER_DEEP_PROXY_BASE=https://your-deep-proxy.example.com
+SCREENER_DEEP_PROXY_TOKEN=the-same-token-from-the-proxy
+```
+
+The proxy should be protected with the bearer token at minimum. For a stronger setup, also firewall it so only the screener backend can call it.
 
 ## Deployment
 

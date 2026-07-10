@@ -165,8 +165,9 @@ function normalizeRows(rows) {
 function updateStatusFromPayload(payload) {
   const source = payload.source === "binance_ws" ? "WebSocket cache" : "REST cache";
   if (payload.status === "live") {
-    const deepNote = payload.deepStatus === "paused" ? " | deep REST paused" : "";
-    setStatus("live", `Binance live via ${source}${deepNote} | UI 1s | UTC`);
+    const sourceNote = payload.deepProxyEnabled ? " | deep via proxy" : "";
+    const pausedNote = payload.deepStatus === "paused" ? ` | ${deepSourceLabel(payload)} paused${deepRetryLabel(payload)}` : "";
+    setStatus("live", `Binance live via ${source}${sourceNote}${pausedNote} | UI 1s | UTC`);
     return;
   }
   if (payload.status === "stale") {
@@ -305,9 +306,9 @@ function updateTableMeta(rows) {
   els.tableTitle.textContent = EXCHANGE_LABELS[state.exchange];
   const deepStatus = state.payload?.deepStatus;
   const deepText = deepStatus === "paused"
-    ? " | deep REST metrics paused"
+    ? ` | ${deepSourceLabel(state.payload)} metrics paused${deepRetryLabel(state.payload)}`
     : deepStatus === "hydrating"
-      ? ` | deep metrics ${state.payload.deepHydratedCount}/${state.payload.deepTotalRows}`
+      ? ` | ${deepSourceLabel(state.payload)} metrics ${state.payload.deepHydratedCount}/${state.payload.deepTotalRows}`
       : "";
   els.lastRefresh.textContent = state.lastQuoteRefresh
     ? `Last backend quote ${utcTime(state.lastQuoteRefresh)}${deepText}`
@@ -491,10 +492,23 @@ function unavailableValue() {
 }
 
 function deepMetricPlaceholder(key) {
-  if (state.payload?.deepStatus === "paused" || state.payload?.restPaused) {
-    return `<span class="empty-value" title="${escapeHtml(deepMetricLabel(key))} is temporarily unavailable while Binance REST is rate-limited. WebSocket price, 24h volume, 1d change, and funding are still live.">--</span>`;
+  if (state.payload?.deepStatus === "paused" || state.payload?.deepRestPaused) {
+    const source = deepSourceLabel(state.payload);
+    return `<span class="empty-value" title="${escapeHtml(deepMetricLabel(key))} is temporarily unavailable while ${escapeHtml(source)} is paused${escapeHtml(deepRetryLabel(state.payload))}. WebSocket price, 24h volume, 1d change, and funding are still live.">--</span>`;
   }
   return `<span class="pending-value" title="Backend is hydrating ${escapeHtml(deepMetricLabel(key))} in controlled batches">waiting</span>`;
+}
+
+function deepSourceLabel(payload) {
+  return payload?.deepSource === "proxy" ? "deep proxy" : "Binance REST";
+}
+
+function deepRetryLabel(payload) {
+  const ms = Number(payload?.deepRetryInMs);
+  if (!Number.isFinite(ms) || ms <= 0) return "";
+  const seconds = Math.ceil(ms / 1000);
+  if (seconds < 90) return `, retry in ${seconds}s`;
+  return `, retry in ${Math.ceil(seconds / 60)}m`;
 }
 
 function deepMetricLabel(key) {
