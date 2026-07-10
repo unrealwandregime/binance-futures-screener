@@ -14,6 +14,7 @@ This project is intentionally independent. It does not depend on Dash, Plotly, P
 - Tracks price, 5-minute change, 1-hour change, 24-hour change, volume, open interest, funding, volatility, and 5-minute trade count.
 - Uses a shared backend cache so every visitor is not hitting Binance from their own browser.
 - Hydrates heavier per-symbol metrics in rolling batches so the app stays responsive on small hosting plans.
+- Falls back to browser-side Binance public-data hydration for deep fields when cloud-provider REST egress is blocked.
 - Shows UTC timestamps, cache age, hydration progress, and feed status in the UI.
 - Opens sorted by highest signal first, so the strongest anomaly candidates are at the top immediately.
 - Runs on Render Free, Docker, or any small Python web host.
@@ -40,6 +41,8 @@ flowchart LR
 The backend prefers Binance WebSocket ticker streams for fresh quote data through the current USD-M futures market route, `wss://fstream.binance.com/market/ws`. If the stream is not warm after a short grace period, it can fall back to Binance REST. Heavier metrics such as open interest, 1-hour volume, volatility, and trade count are fetched separately in controlled batches.
 
 For production, the public screener can keep running on Render while deep metrics are fetched through a separate REST proxy on a cleaner outbound IP. That proxy is optional. If `SCREENER_DEEP_PROXY_BASE` is not set, the app behaves exactly like the normal single-service version.
+
+The browser UI also includes a throttled direct-fill fallback for deep metrics. If Binance blocks a cloud host's REST egress, the backend still streams live quote data from Binance WebSocket and the visitor's browser fills the REST-only fields for top rows from public Binance endpoints. This keeps the public demo useful without requiring private exchange credentials or a paid proxy.
 
 ## Tech Stack
 
@@ -221,6 +224,7 @@ SCREENER_DEEP_PROXY_TOKEN=the-same-token-from-the-proxy
 ```
 
 The proxy should be protected with the bearer token at minimum. For a stronger setup, also firewall it so only the screener backend can call it.
+
 
 ## Deployment
 

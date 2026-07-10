@@ -4,6 +4,12 @@ __pycache__/
 .deep-proxy-token.local
 *.pid
 *.log
+.last-deploy.json
+.netlify-sites.json
+node_modules/
+.wrangler/
+.netlify/
+.dev.vars
 .venv/
 venv/
 .pytest_cache/

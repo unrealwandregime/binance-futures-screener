@@ -4,7 +4,16 @@ const CONFIG = {
   quoteRefreshMs: 1_000,
   requestTimeoutMs: 8_000,
   maxRenderedRows: 240,
+  browserDeepEnabled: true,
+  browserDeepMaxSymbols: 90,
+  browserDeepCacheTtlMs: 180_000,
+  browserDeepConcurrency: 2,
 };
+
+const BINANCE_BROWSER_BASES = [
+  "https://www.binance.com",
+  "https://fapi.binance.com",
+];
 
 const EXCHANGE_LABELS = {
   binance: "Binance Futures",
@@ -43,6 +52,12 @@ const state = {
   lastQuoteRefresh: null,
   payload: null,
   apiBase: resolveApiBase(),
+  browserDeepCache: new Map(),
+  browserDeepQueued: new Set(),
+  browserDeepInflight: new Set(),
+  browserDeepQueue: [],
+  browserDeepLastError: null,
+  browserDeepUpdatedAt: null,
 };
 
 const els = {};
@@ -131,6 +146,7 @@ async function refreshData(manual) {
     state.payload = payload;
     state.lastQuoteRefresh = payload.generatedAt ? Date.parse(payload.generatedAt) : Date.now();
     state.rows = normalizeRows(payload.rows || []);
+    scheduleBrowserDeepHydration();
     renderAll();
     updateStatusFromPayload(payload);
   } catch (error) {
@@ -156,10 +172,14 @@ async function fetchScreenerPayload() {
 }
 
 function normalizeRows(rows) {
-  return rows.map((row) => ({
-    ...row,
-    score: Number.isFinite(Number(row.score)) ? Number(row.score) : computeSignalScore(row),
-  }));
+  pruneBrowserDeepCache();
+  return rows.map((row) => {
+    const merged = mergeBrowserDeepMetrics(row);
+    return {
+      ...merged,
+      score: computeSignalScore(merged),
+    };
+  });
 }
 
 function updateStatusFromPayload(payload) {
@@ -167,7 +187,8 @@ function updateStatusFromPayload(payload) {
   if (payload.status === "live") {
     const sourceNote = payload.deepProxyEnabled ? " | deep via proxy" : "";
     const pausedNote = payload.deepStatus === "paused" ? ` | ${deepSourceLabel(payload)} paused${deepRetryLabel(payload)}` : "";
-    setStatus("live", `Binance live via ${source}${sourceNote}${pausedNote} | UI 1s | UTC`);
+    const browserNote = shouldUseBrowserDeepFallback(payload) ? " | browser deep fill" : "";
+    setStatus("live", `Binance live via ${source}${sourceNote}${browserNote}${pausedNote} | UI 1s | UTC`);
     return;
   }
   if (payload.status === "stale") {
@@ -273,7 +294,7 @@ function renderCell(row, key) {
   if (key === "symbol") {
     return `<div class="symbol-cell"><strong>${escapeHtml(row.symbol)}</strong><span>${escapeHtml(row.venue || "Binance Futures")}</span></div>`;
   }
-  if (DEEP_METRIC_KEYS.has(key) && !row.deepHydrated) return deepMetricPlaceholder(key);
+  if (DEEP_METRIC_KEYS.has(key) && !row.deepHydrated) return deepMetricPlaceholder(row, key);
   if (key === "price") return formatPrice(row.price);
   if (key === "chg5m" || key === "chg1h" || key === "chg1d" || key === "oiChg1h") return pctCell(row[key], 2);
   if (key === "vol1h" || key === "quoteVolume24h" || key === "oiUsd") return formatUsd(row[key]);
@@ -305,14 +326,198 @@ function renderMetrics(rows) {
 function updateTableMeta(rows) {
   els.tableTitle.textContent = EXCHANGE_LABELS[state.exchange];
   const deepStatus = state.payload?.deepStatus;
+  const browserCount = [...state.browserDeepCache.values()]
+    .filter((entry) => Date.now() - entry.ts < CONFIG.browserDeepCacheTtlMs)
+    .length;
+  const browserText = shouldUseBrowserDeepFallback(state.payload) && browserCount
+    ? ` | browser-filled ${browserCount}`
+    : "";
   const deepText = deepStatus === "paused"
     ? ` | ${deepSourceLabel(state.payload)} metrics paused${deepRetryLabel(state.payload)}`
     : deepStatus === "hydrating"
       ? ` | ${deepSourceLabel(state.payload)} metrics ${state.payload.deepHydratedCount}/${state.payload.deepTotalRows}`
       : "";
   els.lastRefresh.textContent = state.lastQuoteRefresh
-    ? `Last backend quote ${utcTime(state.lastQuoteRefresh)}${deepText}`
+    ? `Last backend quote ${utcTime(state.lastQuoteRefresh)}${deepText}${browserText}`
     : "Waiting for backend data";
+}
+
+function shouldUseBrowserDeepFallback(payload) {
+  if (!CONFIG.browserDeepEnabled || !payload) return false;
+  return payload.deepStatus === "paused" ||
+    payload.deepRestPaused ||
+    payload.deepHydratedCount < Math.min(payload.deepTotalRows || 0, CONFIG.browserDeepMaxSymbols);
+}
+
+function pruneBrowserDeepCache() {
+  const now = Date.now();
+  for (const [symbol, entry] of state.browserDeepCache.entries()) {
+    if (now - entry.ts > CONFIG.browserDeepCacheTtlMs * 2) {
+      state.browserDeepCache.delete(symbol);
+    }
+  }
+}
+
+function mergeBrowserDeepMetrics(row) {
+  const cached = state.browserDeepCache.get(row.symbol);
+  if (!cached || Date.now() - cached.ts > CONFIG.browserDeepCacheTtlMs) return row;
+  const merged = { ...row, ...cached.metrics };
+  merged.deepHydrated = row.deepHydrated || Object.keys(cached.metrics).some((key) => DEEP_METRIC_KEYS.has(key));
+  merged.deepFilledBy = row.deepHydrated ? row.deepFilledBy : "browser";
+  return merged;
+}
+
+function scheduleBrowserDeepHydration() {
+  if (!shouldUseBrowserDeepFallback(state.payload)) return;
+  const now = Date.now();
+  const targets = sortRows([...state.rows])
+    .filter((row) => row.symbol && row.price)
+    .slice(0, CONFIG.browserDeepMaxSymbols);
+
+  for (const row of targets) {
+    const cached = state.browserDeepCache.get(row.symbol);
+    const fresh = cached && now - cached.ts < CONFIG.browserDeepCacheTtlMs;
+    if (row.deepHydrated || fresh || state.browserDeepQueued.has(row.symbol) || state.browserDeepInflight.has(row.symbol)) {
+      continue;
+    }
+    state.browserDeepQueued.add(row.symbol);
+    state.browserDeepQueue.push({ symbol: row.symbol, price: row.price });
+  }
+
+  pumpBrowserDeepQueue();
+}
+
+function pumpBrowserDeepQueue() {
+  if (!CONFIG.browserDeepEnabled) return;
+  while (state.browserDeepInflight.size < CONFIG.browserDeepConcurrency && state.browserDeepQueue.length) {
+    const item = state.browserDeepQueue.shift();
+    state.browserDeepQueued.delete(item.symbol);
+    state.browserDeepInflight.add(item.symbol);
+    hydrateBrowserDeepSymbol(item)
+      .catch((error) => {
+        state.browserDeepLastError = error.message || String(error);
+      })
+      .finally(() => {
+        state.browserDeepInflight.delete(item.symbol);
+        window.setTimeout(pumpBrowserDeepQueue, 350);
+      });
+  }
+}
+
+async function hydrateBrowserDeepSymbol({ symbol, price }) {
+  const metrics = await fetchBrowserDeepMetrics(symbol, price);
+  if (!Object.keys(metrics).length) return;
+
+  state.browserDeepCache.set(symbol, { ts: Date.now(), metrics });
+  state.browserDeepUpdatedAt = Date.now();
+  state.rows = state.rows.map((row) => row.symbol === symbol
+    ? { ...mergeBrowserDeepMetrics(row), score: computeSignalScore(mergeBrowserDeepMetrics(row)) }
+    : row);
+  renderAll();
+}
+
+async function fetchBrowserDeepMetrics(symbol, price) {
+  const metrics = {};
+
+  const klines = await fetchBinanceBrowserJson("/fapi/v1/klines", {
+    symbol,
+    interval: "1m",
+    limit: 65,
+  });
+  Object.assign(metrics, metricsFromBinanceKlines(Array.isArray(klines) ? klines : []));
+
+  try {
+    const oi = await fetchBinanceBrowserJson("/fapi/v1/openInterest", { symbol });
+    const contracts = nullableNumber(oi?.openInterest);
+    if (contracts && price) metrics.oiUsd = contracts * Number(price);
+  } catch (error) {
+    state.browserDeepLastError = error.message || String(error);
+  }
+
+  try {
+    const history = await fetchBinanceBrowserJson("/futures/data/openInterestHist", {
+      symbol,
+      period: "5m",
+      limit: 13,
+    });
+    Object.assign(metrics, metricsFromOpenInterestHistory(Array.isArray(history) ? history : []));
+  } catch (error) {
+    state.browserDeepLastError = error.message || String(error);
+  }
+
+  return Object.fromEntries(
+    Object.entries(metrics).filter(([key, value]) => DEEP_METRIC_KEYS.has(key) && isFiniteNumber(value))
+  );
+}
+
+async function fetchBinanceBrowserJson(path, params) {
+  const query = new URLSearchParams();
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value !== undefined && value !== null) query.set(key, value);
+  });
+
+  let lastError = null;
+  for (const base of BINANCE_BROWSER_BASES) {
+    try {
+      return await fetchJson(`${base}${path}?${query.toString()}`, { timeoutMs: 7_000 });
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError || new Error("Binance browser fetch failed");
+}
+
+function metricsFromBinanceKlines(rows) {
+  const candles = [];
+  for (const row of rows) {
+    if (!Array.isArray(row) || row.length < 9) continue;
+    const candle = {
+      high: nullableNumber(row[2]),
+      low: nullableNumber(row[3]),
+      close: nullableNumber(row[4]),
+      quoteVolume: nullableNumber(row[7]) || 0,
+      trades: nullableNumber(row[8]) || 0,
+    };
+    if (candle.close) candles.push(candle);
+  }
+  if (!candles.length) return {};
+
+  const last = candles[candles.length - 1];
+  const ago = (minutes) => candles[Math.max(0, candles.length - 1 - minutes)];
+  const last5 = candles.slice(-5);
+  const last15 = candles.slice(-15);
+  const last60 = candles.slice(-60);
+  const high15 = Math.max(...last15.map((row) => row.high || 0));
+  const low15 = Math.min(...last15.map((row) => row.low || 0));
+
+  return {
+    chg5m: pctChange(last.close, ago(5).close),
+    chg1h: pctChange(last.close, ago(60).close),
+    vol1h: sumNumbers(last60.map((row) => row.quoteVolume)),
+    volatility15m: last.close ? ((high15 - low15) / last.close) * 100 : null,
+    trades5m: sumNumbers(last5.map((row) => row.trades)),
+  };
+}
+
+function metricsFromOpenInterestHistory(history) {
+  const rows = history
+    .map((row) => ({
+      value: nullableNumber(row?.sumOpenInterestValue),
+      contracts: nullableNumber(row?.sumOpenInterest),
+    }))
+    .filter((row) => row.value || row.contracts);
+  if (rows.length < 2) return {};
+
+  const first = rows[0];
+  const last = rows[rows.length - 1];
+  const metric = first.value && last.value ? "value" : "contracts";
+  const output = { oiChg1h: pctChange(last[metric], first[metric]) };
+  if (last.value) output.oiUsd = last.value;
+  return output;
+}
+
+function sumNumbers(values) {
+  return values.reduce((total, value) => Number.isFinite(Number(value)) ? total + Number(value) : total, 0);
 }
 
 function renderLoadingState() {
@@ -413,6 +618,11 @@ function num(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function nullableNumber(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function isFiniteNumber(value) {
   return value !== null && value !== "" && Number.isFinite(Number(value));
 }
@@ -491,10 +701,16 @@ function unavailableValue() {
   return `<span class="unavailable-value" title="Binance does not currently provide this value for the symbol">n/a</span>`;
 }
 
-function deepMetricPlaceholder(key) {
+function deepMetricPlaceholder(row, key) {
+  if (state.browserDeepInflight.has(row.symbol)) {
+    return `<span class="pending-value" title="Browser is filling ${escapeHtml(deepMetricLabel(key))} directly from Binance public data">syncing</span>`;
+  }
+  if (state.browserDeepQueued.has(row.symbol)) {
+    return `<span class="pending-value" title="Queued for browser-side Binance public data fill">queued</span>`;
+  }
   if (state.payload?.deepStatus === "paused" || state.payload?.deepRestPaused) {
     const source = deepSourceLabel(state.payload);
-    return `<span class="empty-value" title="${escapeHtml(deepMetricLabel(key))} is temporarily unavailable while ${escapeHtml(source)} is paused${escapeHtml(deepRetryLabel(state.payload))}. WebSocket price, 24h volume, 1d change, and funding are still live.">--</span>`;
+    return `<span class="pending-value" title="${escapeHtml(deepMetricLabel(key))} is being filled in the browser because ${escapeHtml(source)} is paused${escapeHtml(deepRetryLabel(state.payload))}.">syncing</span>`;
   }
   return `<span class="pending-value" title="Backend is hydrating ${escapeHtml(deepMetricLabel(key))} in controlled batches">waiting</span>`;
 }

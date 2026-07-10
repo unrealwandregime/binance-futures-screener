@@ -715,7 +715,7 @@ def add_cors_headers(response):
         "script-src 'self' https://unpkg.com; "
         "style-src 'self'; "
         "img-src 'self' data:; "
-        "connect-src 'self' https://binance-futures-screener-a39v.onrender.com http://127.0.0.1:8050 http://localhost:8050; "
+        "connect-src 'self' https://binance-futures-screener-a39v.onrender.com https://www.binance.com https://fapi.binance.com http://127.0.0.1:8050 http://localhost:8050; "
         "font-src 'self'; "
         "base-uri 'self'; "
         "form-action 'none'; "
