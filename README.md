@@ -199,6 +199,10 @@ Production proxy command:
 gunicorn deep_proxy:server --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120
 ```
 
+Vercel proxy deployment:
+
+This repository also includes `pyproject.toml` and `vercel.json` so Vercel loads `deep_proxy:app` directly as a Python Flask backend. Use the same proxy environment variables in the Vercel project settings.
+
 Recommended proxy environment:
 
 | Variable | Default | Purpose |

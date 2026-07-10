@@ -1,0 +1,2 @@
+[tool.vercel]
+entrypoint = "deep_proxy:app"

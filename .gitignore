@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 .env
+.deep-proxy-token.local
 .venv/
 venv/
 .pytest_cache/
